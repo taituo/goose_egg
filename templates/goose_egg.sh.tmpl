@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Codex best practice: keep bootstrap steps idempotent and tmux-friendly.
+set -euo pipefail
+
+# goose-egg.sh — bootstrap everything without breaking Markdown fences.
+
+# -----------------------------
+# Hardcoded settings (edit if needed)
+# -----------------------------
+PROJECT_ROOT="{{PROJECT_ROOT}}"
+MODULE_PATH="{{MODULE_PATH}}"
+SESSION_NAME="{{SESSION_NAME}}"
+EDITOR_CMD="{{EDITOR_CMD}}"
+MODEL_NAME="{{MODEL_NAME}}"
+
+# -----------------------------
+# Runtime flags (defaults)
+#   --exec              -> Codex non-interactive one-shot
+#   --kill-codex-first  -> (no-op) preserved for compatibility; prints a note
+#   --skip-codex        -> skip Codex stage entirely
+# -----------------------------
+CODEX_MODE="interactive"   # or "exec"
+KILL_CODEX_FIRST="no"
+SKIP_CODEX="no"
+
+for arg in "$@"; do
+  case "$arg" in
+    --exec) CODEX_MODE="exec" ;;
+    --kill-codex-first) KILL_CODEX_FIRST="yes" ;;
+    --skip-codex) SKIP_CODEX="yes" ;;
+    *)
+      echo "Unknown flag: $arg" >&2
+      echo "Supported: --exec | --kill-codex-first | --skip-codex" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# -----------------------------
+# Helpers
+# -----------------------------
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing dependency: $1" >&2; exit 1; }; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Usage:
+# write_if_absent "path/to/file" <<'EOF'
+# ...contents...
+# EOF
+write_if_absent() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    echo "[i] Exists, not overwriting: $path"
+  else
+    mkdir -p "$(dirname "$path")"
+    # shellcheck disable=SC2094
+    cat > "$path"
+    echo "[i] Created: $path"
+  fi
+}
+
+commit_if_changes() {
+  if ! git diff --quiet --cached || ! git diff --quiet; then
+    git add -A
+    if ! git diff --cached --quiet; then
+      git commit -m "$1"
+      echo "[i] Commit done: $1"
+    else
+      echo "[i] Nothing to commit."
+    fi
+  else
+    echo "[i] No changes."
+  fi
+}
+
+TODAY="$(date +%F)"
+
+# -----------------------------
+# Dependencies
+# -----------------------------
+need git
+need go
+need tmux
+# codex optional: may be skipped
+if ! have codex; then
+  echo "[w] codex not found; you can install/login later. (Use --skip-codex to silence this.)"
+fi
+
+# -----------------------------
+# Repo init
+# -----------------------------
+mkdir -p "$PROJECT_ROOT"
+cd "$PROJECT_ROOT"
+
+if [ -d .git ]; then
+  echo "[i] Git repo already exists at: $PROJECT_ROOT"
+else
+  echo "[i] Initializing empty repo at: $PROJECT_ROOT"
+  git init
+fi
+
+# Detect current default branch (main/master...)
+DEFAULT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo main)"
+
+# -----------------------------
+# Minimal Go stub (create only if missing)
+# -----------------------------
+if [ ! -f go.mod ]; then
+  echo "[i] Creating Go module + minimal stub"
+  go mod init "$MODULE_PATH" >/dev/null 2>&1 || true
+else
+  echo "[i] go.mod exists, skipping go mod init"
+fi
+
+write_if_absent "main.go" <<'EO_MAIN'
+{{MAIN_GO}}
+EO_MAIN
+
+# First commit on default branch if repo is empty
+git add -A || true
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+  echo "[i] Repository already has commits."
+else
+  git commit -m "chore: init stub (goose)"
+fi
+
+# -----------------------------
+# Switch/create dev branch
+# -----------------------------
+if git rev-parse --verify dev >/dev/null 2>&1; then
+  git switch dev
+else
+  git switch -c dev
+fi
+
+echo "[i] Creating repository layout and docs (no triple-backtick fences inside files)"
+
+# -----------------------------
+# Docs (create only if missing)
+# -----------------------------
+write_if_absent "SPEC.md" <<'EO_SPEC'
+{{SPEC_MD}}
+EO_SPEC
+
+write_if_absent "CLI.md" <<'EO_CLI'
+{{CLI_MD}}
+EO_CLI
+
+write_if_absent "ROLE.md" <<'EO_ROLE'
+{{ROLE_MD}}
+EO_ROLE
+
+write_if_absent "OPERATIONS.md" <<'EO_OPS'
+{{OPERATIONS_MD}}
+EO_OPS
+
+write_if_absent "README.md" <<'EO_README'
+{{README_MD}}
+EO_README
+
+# -----------------------------
+# Tasks and handoffs (on dev)
+# -----------------------------
+mkdir -p tasks handoffs/outbox personas
+
+write_if_absent "tasks/TASK-001-login-api.md" <<'EO_TASK1'
+{{TASK1_MD}}
+EO_TASK1
+
+write_if_absent "handoffs/inbox.md" <<'EO_INBOX'
+{{INBOX_MD}}
+EO_INBOX
+
+write_if_absent "handoffs/outbox/GOOSE.md" <<'EO_GOOSE_OB'
+{{GOOSE_OB}}
+EO_GOOSE_OB
+
+write_if_absent "handoffs/outbox/MAVERICK.md" <<'EO_MAV_OB'
+{{MAVERICK_OB}}
+EO_MAV_OB
+
+# .gitignore (small starter)
+write_if_absent ".gitignore" <<'EO_IGN'
+{{GITIGNORE}}
+EO_IGN
+
+commit_if_changes "docs: scaffold goose spec/cli/roles/ops + tasks and handoffs (dev)"
+
+# -----------------------------
+# Codex (default interactive; optional exec)
+# -----------------------------
+if [ "${SKIP_CODEX}" = "no" ]; then
+  if have codex; then
+    if [ "${KILL_CODEX_FIRST}" = "yes" ]; then
+      echo "[i] --kill-codex-first set, but automatic process kill was removed. Please close existing Codex processes manually if needed."
+    fi
+
+    CODEX_PROMPT='Read SPEC.md, CLI.md, ROLE.md, and OPERATIONS.md. Implement the next minimal increment for the goose CLI that satisfies the MUST-have items (session, worktrees, handoffs, radio, and AI flags) in small, testable steps. Keep it tmux and vim friendly, with no GUI and no external project references. Update README with usage.'
+
+    if [ "$CODEX_MODE" = "exec" ]; then
+      echo "[i] Running Codex (exec, one-shot, dangerous bypass)"
+      set +e
+      codex exec \
+        --cd "$PROJECT_ROOT" \
+        --dangerously-bypass-approvals-and-sandbox \
+        -m "$MODEL_NAME" \
+        "$CODEX_PROMPT"
+      CODEX_RC=$?
+      set -e
+      if [ "$CODEX_RC" -ne 0 ]; then
+        echo "[w] codex exec failed (rc=$CODEX_RC). Continuing."
+      fi
+    else
+      echo "[i] Starting Codex (interactive, dangerous bypass). Close it when done."
+      echo "[i] Tip: you can always resume later with: codex resume --last"
+      set +e
+      codex \
+        --cd "$PROJECT_ROOT" \
+        --dangerously-bypass-approvals-and-sandbox \
+        -m "$MODEL_NAME" \
+        "$CODEX_PROMPT"
+      CODEX_RC=$?
+      set -e
+      if [ "$CODEX_RC" -ne 0 ]; then
+        echo "[w] interactive Codex exited with rc=$CODEX_RC."
+      fi
+    fi
+  else
+    echo "[w] codex not found; skipping Codex run."
+  fi
+else
+  echo "[i] Skipping Codex stage by request."
+fi
+
+echo
+echo "Next:"
+echo "  1) Inspect changes: git status && git log --oneline -n 5"
+echo "  2) Build locally:   go build -o goose ."
+echo "  3) Start session:   ./goose session start --repo . --session \"$SESSION_NAME\" --editor \"$EDITOR_CMD\" --ops"
+echo "  4) Start Codex pane: codex -m \"$MODEL_NAME\" --cd \"$PROJECT_ROOT\""
+echo "     (or re-run this script with --exec for one-shot Codex)"

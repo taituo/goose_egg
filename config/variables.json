@@ -1,0 +1,23 @@
+{
+  "project_root": "/root/dev/talktomegoose_reboot",
+  "module_path": "github.com/tuotai/talktomegoose_reboot",
+  "session_name": "flight",
+  "editor_cmd": "nvim",
+  "model_name": "gpt-5",
+  "template": "templates/goose_egg.sh.tmpl",
+  "docs": {
+    "SPEC_MD": "templates/docs/SPEC.md.tmpl",
+    "CLI_MD": "templates/docs/CLI.md.tmpl",
+    "ROLE_MD": "templates/docs/ROLE.md.tmpl",
+    "OPERATIONS_MD": "templates/docs/OPERATIONS.md.tmpl",
+    "README_MD": "templates/docs/README.md.tmpl"
+  },
+  "snippets": {
+    "MAIN_GO": "templates/snippets/main.go.tmpl",
+    "TASK1_MD": "templates/snippets/tasks/TASK-001-login-api.md.tmpl",
+    "INBOX_MD": "templates/snippets/handoffs/inbox.md.tmpl",
+    "GOOSE_OB": "templates/snippets/handoffs/outbox/GOOSE.md.tmpl",
+    "MAVERICK_OB": "templates/snippets/handoffs/outbox/MAVERICK.md.tmpl",
+    "GITIGNORE": "templates/snippets/gitignore.tmpl"
+  }
+}
