@@ -14,6 +14,18 @@ EDITOR_CMD="{{EDITOR_CMD}}"
 MODEL_NAME="{{MODEL_NAME}}"
 
 # -----------------------------
+# Egg metadata (for verification & extraction)
+# -----------------------------
+EGG_NAME="{{EGG_NAME}}"
+EGG_SCHEMA="{{EGG_SCHEMA}}"
+EGG_DESCRIPTION="{{EGG_DESCRIPTION}}"
+VARIANT_NAME="{{VARIANT_NAME}}"
+VARIANT_TARGET="{{VARIANT_TARGET}}"
+VARIANT_PROFILE="{{VARIANT_PROFILE}}"
+VARIANT_PROVIDER="{{VARIANT_PROVIDER}}"
+EGG_PAYLOAD_SHA256="{{EGG_PAYLOAD_SHA256}}"
+
+# -----------------------------
 # Runtime flags (defaults)
 #   --exec              -> Codex non-interactive one-shot
 #   --kill-codex-first  -> (no-op) preserved for compatibility; prints a note
@@ -22,15 +34,54 @@ MODEL_NAME="{{MODEL_NAME}}"
 CODEX_MODE="interactive"   # or "exec"
 KILL_CODEX_FIRST="no"
 SKIP_CODEX="no"
+VERIFY_EGG="no"
+EXTRACT_EGG_DEST=""
 
-for arg in "$@"; do
-  case "$arg" in
-    --exec) CODEX_MODE="exec" ;;
-    --kill-codex-first) KILL_CODEX_FIRST="yes" ;;
-    --skip-codex) SKIP_CODEX="yes" ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --exec)
+      CODEX_MODE="exec"
+      shift
+      ;;
+    --kill-codex-first)
+      KILL_CODEX_FIRST="yes"
+      shift
+      ;;
+    --skip-codex)
+      SKIP_CODEX="yes"
+      shift
+      ;;
+    --verify-egg)
+      VERIFY_EGG="yes"
+      shift
+      ;;
+    --extract-egg)
+      EXTRACT_EGG_DEST="egg_payload"
+      shift
+      if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+        EXTRACT_EGG_DEST="$1"
+        shift
+      fi
+      ;;
+    --extract-egg=*)
+      EXTRACT_EGG_DEST="${1#--extract-egg=}"
+      shift
+      ;;
+    --help)
+      cat <<'EO_HELP'
+Usage: ./goose_egg.sh [flags]
+
+  --exec               Run Codex in exec (one-shot) mode after scaffolding.
+  --kill-codex-first   Preserve compatibility; prints reminder only.
+  --skip-codex         Skip launching Codex entirely.
+  --verify-egg         Verify embedded egg manifest and exit.
+  --extract-egg[=DIR]  Recover the egg payload into DIR (default: ./egg_payload) and exit.
+EO_HELP
+      exit 0
+      ;;
     *)
-      echo "Unknown flag: $arg" >&2
-      echo "Supported: --exec | --kill-codex-first | --skip-codex" >&2
+      echo "Unknown flag: $1" >&2
+      echo "Supported: --exec | --kill-codex-first | --skip-codex | --verify-egg | --extract-egg[=DIR]" >&2
       exit 1
       ;;
   esac
@@ -73,6 +124,163 @@ commit_if_changes() {
 }
 
 TODAY="$(date +%F)"
+
+read_egg_payload() {
+  cat <<'EO_EGG_PAYLOAD'
+{{EGG_PAYLOAD_B64}}
+EO_EGG_PAYLOAD
+}
+
+read_egg_manifest() {
+  cat <<'EO_EGG_MANIFEST'
+{{EGG_MANIFEST_JSON}}
+EO_EGG_MANIFEST
+}
+
+ensure_python() {
+  if ! have python3; then
+    echo "[e] python3 is required for egg verification and extraction." >&2
+    exit 1
+  fi
+}
+
+run_egg_tool() {
+  ensure_python
+  local mode="$1"
+  local destination="${2:-.}"
+  local payload_file manifest_file
+  payload_file="$(mktemp)"
+  manifest_file="$(mktemp)"
+  read_egg_payload >"$payload_file"
+  read_egg_manifest >"$manifest_file"
+  python3 - "$mode" "$payload_file" "$manifest_file" "$EGG_PAYLOAD_SHA256" "$destination" <<'PY'
+import base64
+import hashlib
+import io
+import json
+import sys
+import tarfile
+from pathlib import Path
+
+mode, payload_path, manifest_path, expected_sha, destination = sys.argv[1:6]
+
+with open(payload_path, "r", encoding="utf-8") as handle:
+    payload_bytes = base64.b64decode(handle.read().encode())
+
+payload_hash = hashlib.sha256(payload_bytes).hexdigest()
+if payload_hash != expected_sha:
+    print("[e] Egg payload SHA mismatch", file=sys.stderr)
+    sys.exit(1)
+
+with open(manifest_path, "r", encoding="utf-8") as handle:
+    manifest = json.load(handle)
+
+buffer = io.BytesIO(payload_bytes)
+with tarfile.open(fileobj=buffer, mode="r:gz") as archive:
+    members = {member.name: member for member in archive.getmembers() if member.isfile()}
+    manifest_names = set(manifest.keys())
+    member_names = set(members.keys())
+
+    extra_members = sorted(member_names - manifest_names)
+    missing_members = sorted(manifest_names - member_names)
+
+    if extra_members:
+        print(f"[e] Payload contains files missing in manifest: {', '.join(extra_members)}", file=sys.stderr)
+        sys.exit(1)
+    if missing_members:
+        print(f"[e] Manifest references missing files: {', '.join(missing_members)}", file=sys.stderr)
+        sys.exit(1)
+
+    for name, member in members.items():
+        path_parts = Path(name).parts
+        if name.startswith("/") or ".." in path_parts:
+            print(f"[e] Unsafe path in payload: {name}", file=sys.stderr)
+            sys.exit(1)
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            print(f"[e] Unable to read payload member: {name}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            data = extracted.read()
+        finally:
+            extracted.close()
+        digest = hashlib.sha256(data).hexdigest()
+        expected = manifest[name]
+        if digest != expected:
+            print(f"[e] Checksum mismatch for {name}", file=sys.stderr)
+            sys.exit(1)
+
+if mode == "verify":
+    sys.exit(0)
+
+destination_path = Path(destination)
+destination_path.mkdir(parents=True, exist_ok=True)
+destination_root = destination_path.resolve()
+
+buffer = io.BytesIO(payload_bytes)
+with tarfile.open(fileobj=buffer, mode="r:gz") as archive:
+    for member in archive.getmembers():
+        target = destination_path / member.name
+        target_resolved = target.resolve()
+        if not target_resolved.is_relative_to(destination_root):
+            print(f"[e] Unsafe extraction target for {member.name}", file=sys.stderr)
+            sys.exit(1)
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif member.isfile():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                print(f"[e] Unable to read payload member: {member.name}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                data = extracted.read()
+            finally:
+                extracted.close()
+            with open(target, "wb") as handle:
+                handle.write(data)
+        else:
+            print(f"[e] Unsupported tar entry type for {member.name}", file=sys.stderr)
+            sys.exit(1)
+PY
+  local status=$?
+  rm -f "$payload_file" "$manifest_file"
+  return $status
+}
+
+verify_egg_payload() {
+  if run_egg_tool verify "."; then
+    echo "[i] Egg payload verified (${EGG_NAME:-unknown} :: ${VARIANT_NAME:-default})."
+  else
+    echo "[e] Egg verification failed." >&2
+    return 1
+  fi
+}
+
+extract_egg() {
+  local destination="$1"
+  if run_egg_tool extract "$destination"; then
+    echo "[i] Egg verified (${EGG_NAME:-unknown} :: ${VARIANT_NAME:-default}) and extracted to $destination"
+  else
+    echo "[e] Failed to extract egg to $destination" >&2
+    return 1
+  fi
+}
+
+if [ -n "$EXTRACT_EGG_DEST" ]; then
+  extract_egg "$EXTRACT_EGG_DEST" || exit 1
+  exit 0
+fi
+
+if [ "$VERIFY_EGG" = "yes" ]; then
+  verify_egg_payload || exit 1
+  exit 0
+fi
+
+echo "[i] Egg: ${EGG_NAME:-unknown} (schema ${EGG_SCHEMA:-v1}, variant ${VARIANT_NAME:-default})"
+if [ -n "${VARIANT_TARGET}${VARIANT_PROFILE}${VARIANT_PROVIDER}" ]; then
+  echo "[i] Variant target=${VARIANT_TARGET:-n/a} profile=${VARIANT_PROFILE:-n/a} provider=${VARIANT_PROVIDER:-n/a}"
+fi
 
 # -----------------------------
 # Dependencies

@@ -1,10 +1,20 @@
 {
-  "project_root": "/root/dev/talktomegoose_reboot",
-  "module_path": "github.com/tuotai/talktomegoose_reboot",
-  "session_name": "flight",
-  "editor_cmd": "nvim",
-  "model_name": "gpt-5",
+  "egg_schema": "v1",
+  "egg_name": "goose-egg",
+  "description": "Soft egg for the Goose tmux multi-agent bootstrapper.",
   "template": "templates/goose_egg.sh.tmpl",
+  "variants": {
+    "go-minimal": {
+      "target": "go",
+      "profile": "minimal",
+      "provider": "openai",
+      "project_root": "/root/dev/talktomegoose_reboot",
+      "module_path": "github.com/tuotai/talktomegoose_reboot",
+      "session_name": "flight",
+      "editor_cmd": "nvim",
+      "model_name": "gpt-5"
+    }
+  },
   "docs": {
     "SPEC_MD": "templates/docs/SPEC.md.tmpl",
     "CLI_MD": "templates/docs/CLI.md.tmpl",
